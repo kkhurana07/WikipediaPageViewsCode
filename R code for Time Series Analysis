@@ -1,0 +1,313 @@
+install.packages("TSA")
+install.packages("forecast")
+install.packages("cowplot")
+
+library(httr)
+library(tidyverse)
+library(magrittr)
+library(scales)
+library(lubridate)
+library(stats)
+library(TSA)
+library(forecast)
+library(glue)
+library(ggplot2)
+library(cowplot)
+
+
+url = "https://wikimedia.org/api/rest_v1/metrics/pageviews/aggregate/en.wikipedia.org/all-access/user/hourly/2022080100/2022080800"
+# load the data from the api
+
+get_tibble <- function(url) {
+  response = content(httr::GET(url))
+  
+  time_stamps = c()
+  views = c()
+  
+  for (item in response$items) {
+    time_stamps = append(time_stamps, item$timestamp)
+    views = append(views, item$views)
+  }
+  
+  time_stamps = parse_date_time(time_stamps, "ymdH")
+  return(tibble(date=time_stamps, views=views))
+}
+
+plot <- function(df) {
+  ggplot(df, aes(x=date, y=views)) +
+    geom_point() +
+    geom_line() +
+    theme(axis.text.x=element_blank())
+}
+
+df = get_tibble(url)
+plot(df)
+data = as.ts(df$views)
+
+(ar1 = arima(data, order=c(1,0,0))) # log likelihood = -2453.02,  aic = 4912.04
+(arma21 = arima(data, order=c(2,0,1))) # log likelihood = -2329.21,  aic = 4668.41. Parameters are not close to 0 or 1. 
+
+abs(round(polyroot(c(1, -1.16103, 0.7287)), 4))
+
+(arma32 = arima(data, order=c(3,0,2))) # log likelihood = -2319.07,  aic = 4652.14 ar3 is 0.1385, but its standard error is 0.1532, which includes zero. 
+abs(round(polyroot(c(1, -1.5676, 0.8265, -0.1385)), 4))
+
+(arma22 = arima(data, order=c(2,0,2))) # log likelihood = -2319.43,  aic = 4650.86 (parimony) similar fit to ARMA32
+abs(round(polyroot(c(1, -1.4254, 0.5654)), 4))
+
+forecast::checkresiduals(arma32)
+forecast::checkresiduals(arma22)
+
+#ACF and PACF
+acf(data, lag.max = 40,main="Autocorrelation Plot for Hourly Views")
+pacf(data,main="Partial Autocorrelation Plot for Hourly Views")
+eacf(data)
+
+#Arma(2,1)
+arma21 = arima(data, order = c(2, 0, 1))
+
+residuals_arma21_model = rstandard(arma21)
+
+#plot for predicted residual
+ts.plot(residuals_arma21_model,main = "Arma21 predicted Residual Plot")
+
+# Acf and Pacf
+acf(residuals_arma21_model)
+pacf(residuals_arma21_model)
+
+# Histogram for residuals
+
+hist(residuals_arma21_model, xlab = "Standardized Residuals")
+
+qqnorm(residuals_arma21_model, main = "Fitted arma21 residual Q-Q Plot")
+qqline(residuals_arma21_model)
+
+
+arma101 = arima(data, order=c(1, 0, 1), seasonal = list(order = c(0, 1, 0), period=24))
+residuals_arma101_model = rstandard(arma101)
+
+
+#plot for predicted residual
+ts.plot(residuals_arma101_model,main = "Arma101 Predicted Residual Plot")
+
+acf(residuals_arma101_model)
+pacf(residuals_arma101_model)
+
+
+# Histogram for residuals
+
+hist(residuals_arma101_model, xlab="Standardized Residuals")
+
+
+qqnorm(residuals_arma101_model, main = "Fitted arma101 residual Q-Q Plot")
+qqline(residuals_arma101_model)
+
+#Arima100 with seasonal010
+arma100 = arima(data, order=c(1, 0, 0), seasonal = list(order = c(0, 1, 0), period=24))
+residuals_arma100_model = rstandard(arma100)
+#residuals_arma100_model
+
+#plot for predicted residual
+ts.plot(residuals_arma100_model,main = "Arma100 Predicted Residual Plot")
+
+
+acf(residuals_arma100_model)
+pacf(residuals_arma100_model)
+
+
+# Histogram for residuals
+
+hist(residuals_arma100_model, xlab="Standardized Residuals")
+
+#par(mfrow=c(1,2))
+qqnorm(residuals_arma100_model, main = "Fitted arma100 residual Q-Q Plot")
+qqline(residuals_arma100_model)
+
+
+#Let's try seasonality 
+
+diffed_data = diff(data, 24)
+png(file="./diff24acf.png"); acf(diffed_data, lwd=3); dev.off()
+png(file="./diff24pacf.png"); pacf(diffed_data, lwd=3); dev.off()
+
+sarima100 = arima(data, order=c(1,0,0), seasonal=list(order=c(0,1,0), period=24)) # log likelihood = -1878.26,  aic = 3760.51
+sarima101 = arima(data, order=c(1,0,1), seasonal=list(order=c(0,1,0), period=24)) # log likelihood = -1875.44,  aic = 3754.89
+sarima102 = arima(data, order=c(1,0,2), seasonal=list(order=c(0,1,0), period=24)) # log likelihood = -1875.32,  aic = 3756.64
+# ma1 is 0.1853 but its SE is 0.1011
+# ma2 is -0.0531 but its SE is 0.1014
+# But if we look at the differenced data, there appears to be a linear trend
+
+plot.default(diffed_data)
+
+
+sarima100 = Arima(ts(data[1:145], frequency = 24), order=c(1,0,0), seasonal=c(0,1,0))
+sarima101 = Arima(ts(data[1:145], frequency = 24), order=c(1,0,1), seasonal=c(0,1,0))
+
+#########################
+# Begin Probability Simulation Code
+
+num_models_to_simulate = 2
+models = matrix(list(), nrow=num_models_to_simulate, ncol=1)
+models[[1,1]] = sarima100
+models[[2,1]] = sarima101
+
+observations = 169
+simulations = 1000
+matrix_of_probabilites = matrix(ncol=observations, nrow=length(models))
+index = 1 
+threshold = 12000000
+
+for (model in models) {
+  matrix_of_simulated_values = matrix(nrow=observations, ncol=simulations) # 169 observations and 1000 simulations
+  probabilities = vector(mode="integer", length=observations)
+  
+  # Store all the simulated values in a matrix
+  for (simulation in 1:simulations) { 
+    simulated_values = simulate(model, nsim=observations, sd=model$sigma, start.innov=data) # nsim here is the number of observations
+    matrix_of_simulated_values[c(1:observations),simulation] = simulated_values
+  }
+  
+  # Calculate probabilities
+  for (observation in 1:observations) {
+    num_observations_greater_than_threshold = sum(matrix_of_simulated_values[observation,c(1:simulations)] > threshold)  
+    probability = num_observations_greater_than_threshold / simulations; 
+    # Update the probability vector
+    probabilities[observation] = probability 
+  }
+  # Probability matrix stores the probabilities for all models
+  matrix_of_probabilites[index,c(1:length(probabilities))] = probabilities
+  index = index + 1
+}
+par(mfrow=c(2,1))
+y = "Probability"
+x = "Hour"
+title = glue("Estimated Probabilities of Reaching {threshold} Views By Hour")
+
+plot.default(matrix_of_probabilites[1,c(1:length(probabilities))], ylab=y, xlab=x, main=title, pch=18)
+plot.default(matrix_of_probabilites[2,c(1:length(probabilities))], ylab=y, xlab=x, main=title, pch=18)
+png(file="./prob10millsarima101.png"); plot.default(matrix_of_probabilites[2,c(1:length(probabilities))], ylab=y, xlab=x, main=title, pch=18); dev.off()
+
+plot.default(x=c(1:169), y=simulated_values, type="b", pch=18, ylab="Page Views", xlab="Hour")
+difference = matrix_of_probabilites[2,c(1:length(probabilities))] - matrix_of_probabilites[1,c(1:length(probabilities))]
+min(difference); max(difference)
+plot.default(difference, ylab=y, xlab=x, main=title, pch=18)
+# End of probability simulation code
+
+
+test100 = Arima(ts(data,frequency = 24), order=c(1,0,0), seasonal=c(0,1,0))
+test101 = Arima(ts(data,frequency = 24), order=c(1,0,1), seasonal=c(0,1,0))
+#working for test ARIMA100
+ARIMA.res <- list()
+
+cc <- 1
+simulations = 1000
+for(simulation in 1:simulations){
+  simulated_data1 = simulate(test100, start.innov = data  ,sd=test$sigma, nsim=169)
+  
+  simulated_data1
+  
+  extend_data = append(data,simulated_data1)
+  
+  test_data = extend_data[1:193]
+  ARIMA.res[[cc]] <- Arima(ts(test_data,frequency=24), order=c(1,0,0),seasonal=c(0,1,0), method=c("CSS"))
+  cc = cc + 1
+}
+
+
+
+df_100 <- dplyr::bind_rows(lapply(ARIMA.res , coef))
+
+
+boxplot(df_100$ar1, ylab="Phi" , main = expression(atop('AR1 Distribution For', paste('ARIMA(1,0,0)×(0,1,0)'[24]))),cex.main="0.9",cex.lab = "1")
+
+
+
+##Working for ARMA 101
+(test101 = Arima(ts(data,frequency = 24), order=c(1,0,1), seasonal=c(0,1,0)))
+
+ARIMA.res1 <- list()
+
+cc <- 1
+simulations = 1000
+
+for(simulation in 1:simulations){
+  simulated_data1 = simulate(test101, start.innov = data  ,sd=test$sigma, nsim=169)
+  
+  simulated_data1
+  
+  extend_data = append(data,simulated_data1)
+  
+  test_data = extend_data[1:193]
+  ARIMA.res1[[cc]] <- Arima(ts(test_data,frequency=24), order=c(1,0,1),seasonal=c(0,1,0), method=c("CSS"))
+  cc = cc + 1
+  
+}
+
+
+df_101 <- dplyr::bind_rows(lapply(ARIMA.res1 , coef))
+
+
+
+#par(mfrow=c(1,2))
+boxplot(df_101$ar1 , ylab="Phi", main =expression(atop('AR1 Distribution For', paste('ARIMA(1,0,1)×(0,1,0)'[24])))  ,cex.main="0.9",cex.lab = "1")
+boxplot(df_101$ma1 , ylab="Theta", main = expression(atop('MA1 Distribution For', paste('ARIMA(1,0,1)×(0,1,0)'[24]))) ,cex.main="0.9",cex.lab = "1")
+
+
+summary(df_101$ar1)
+summary(df_100$ar1)
+
+##Forecast Part
+
+
+
+url.validation = "https://wikimedia.org/api/rest_v1/metrics/pageviews/aggregate/en.wikipedia.org/all-access/user/hourly/2022080800/2022081500"
+
+df.validation = get_tibble(url.validation)
+df.validation
+
+
+# Forecast
+# take a time series data and apply forecasting with n future observations
+# and plot the results 
+forecast_data <- function(name, model, df.train, df.validation, n = nrow(df.validation) -1) {
+  predicted = forecast(model, n)
+  df.predicted = tibble(date=df.validation$date[1:n+1],
+                        views=as.vector(predicted$mean),
+                        lo95=as.vector(predicted$lower[,2]),
+                        hi95=as.vector(predicted$upper[,2]))
+  
+  plot = ggplot() + ggtitle(name) +
+    geom_line(data = df.train, aes(x=date, y=views)) +
+    geom_line(data = df.validation[1:n+1,], aes(x=date, y=views), color="blue") +
+    geom_line(data = df.predicted, aes(x=date, y=views), color="red") +
+    geom_ribbon(data = df.predicted, aes(x=date, ymin=lo95, ymax=hi95), fill="red", alpha=0.2)
+  scale_x_datetime(date_breaks = "days", date_labels = "%b%d")
+  
+  # predictions start at the first hour of August 8th
+  # but validation data starts at the 0th hour for plot continuity
+  accuracy = accuracy(predicted, df.validation$views[2:n+1])
+  
+  return(list(plot=plot, predicted=predicted, accuracy=accuracy))
+}
+
+
+out1 <- forecast_data("ARMA21", arma21, df, df.validation)
+out2 <- forecast_data("SARIMA100", sarima100, df, df.validation)
+out3 <- forecast_data("SARIMA101", sarima101, df, df.validation)
+out4 <- forecast_data("SARIMA102", sarima102, df, df.validation)
+
+# save the plot
+# png(file="forecast.png", width=1080, height=1080)
+# plot_grid(out1$plot, out2$plot, out3$plot, out4$plot, ncol=2, nrow=2)
+# dev.off()
+
+# FIND accuracy estimates for 1 day worth of forecasting
+out1 <- forecast_data("ARMA21", arma21, df, df.validation, 24)
+out2 <- forecast_data("SARIMA100", sarima100, df, df.validation, 24)
+out3 <- forecast_data("SARIMA101", sarima101, df, df.validation, 24)
+out4 <- forecast_data("SARIMA102", sarima102, df, df.validation, 24)
+
+out1$accuracy
+out2$accuracy
+out3$accuracy
+out4$accuracy
